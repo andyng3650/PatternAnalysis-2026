@@ -3,7 +3,11 @@ dataset.py - Data loading for HipMRI 2D slices (COMP3710, task 2.4).
 
 Uses the provided patient-level split (train / validate / test).
 Each item is one 2D slice, normalised per slice to [0, 1],
-returned as a float32 tensor of shape (1, H, W).
+returned as a float32 tensor of shape (1, 256, 128).
+
+Slices of any other shape are excluded. In the provided data this is one
+training scan (case_019_week_1, 256x144): a crop check against the segmentation
+masks showed its extra columns contain labelled anatomy, so cropping was rejected.
 """
 import argparse
 import glob
@@ -17,6 +21,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 SPLITS = ("train", "validate", "test")
+TARGET_SHAPE = (256, 128)  # all slices except one 256x144 scan, which is excluded
 
 
 def patient_id(path):
@@ -42,9 +47,13 @@ class HipMRIDataset(Dataset):
         if split not in SPLITS:
             raise ValueError(f"split must be one of {SPLITS}, got {split!r}")
         folder = os.path.join(data_dir, f"keras_slices_{split}")
-        self.files = sorted(glob.glob(os.path.join(folder, "*.nii.gz")))
-        if not self.files:
+        all_files = sorted(glob.glob(os.path.join(folder, "*.nii.gz")))
+        if not all_files:
             raise FileNotFoundError(f"No .nii.gz files found in {folder}")
+        # Header-only shape check (fast): keep TARGET_SHAPE slices, exclude the rest
+        self.files, self.excluded = [], []
+        for f in all_files:
+            (self.files if nib.load(f).shape == TARGET_SHAPE else self.excluded).append(f)
 
     def __len__(self):
         return len(self.files)
@@ -58,9 +67,14 @@ def check_split(data_dir, split):
     """Sanity checks: file count, patients, shapes of ALL slices, one batch."""
     ds = HipMRIDataset(data_dir, split)
     patients = {patient_id(f) for f in ds.files}
+    patients_all = patients | {patient_id(f) for f in ds.excluded}
+    print(f"[{split}] {len(ds)} slices kept from {len(patients)} patients "
+          f"({len(patients_all)} patients before exclusion)")
+    if ds.excluded:
+        scans = Counter(re.sub(r"_slice_\d+.*", "", os.path.basename(f)) for f in ds.excluded)
+        print(f"[{split}] excluded (not {TARGET_SHAPE}): {dict(scans)}")
     shapes = Counter(load_slice(f).shape for f in ds.files)
-    print(f"[{split}] {len(ds)} slices from {len(patients)} patients")
-    print(f"[{split}] shapes across all slices: {dict(shapes)}")
+    print(f"[{split}] shapes of kept slices: {dict(shapes)}")
 
     batch = next(iter(DataLoader(ds, batch_size=8, shuffle=True)))
     print(f"[{split}] batch shape {tuple(batch.shape)}, "
