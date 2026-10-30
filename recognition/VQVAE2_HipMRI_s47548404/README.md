@@ -11,8 +11,13 @@
 
 ## 4. Data
 ### 4.1 Dataset
+- HipMRI Study 2D slices (keras_slices_data on Rangpur), NIfTI (.nii.gz), float32
+- Naming: case_<patient>_week_<scan>_slice_<n>; masks: seg_<patient>_week_<scan>_slice_<n>
 ### 4.2 Preprocessing
-### 4.3 Train / Validation / Test Split (patient-level)
+- Per-slice min-max normalisation to [0, 1] (the grayscale channel has no fixed scale, e.g. 0–478)
+### 4.3 Split
+- Provided split used: 31 / 4 / 3 patients, 11,460 / 660 / 540 slices, 60 slices per scan
+- Verified patient-level: zero patient overlap between train, validate and test
 
 ## 5. Dependencies
 
