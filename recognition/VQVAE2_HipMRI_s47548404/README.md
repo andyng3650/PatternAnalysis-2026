@@ -15,6 +15,9 @@
 - Naming: case_<patient>_week_<scan>_slice_<n>; masks: seg_<patient>_week_<scan>_slice_<n>
 ### 4.2 Preprocessing
 - Per-slice min-max normalisation to [0, 1] (the grayscale channel has no fixed scale, e.g. 0–478)
+- Shape check over all slices: one training scan ('case_019_week_1', 60 slices) is 256×144; all others 256×128
+- Crop check: removing 8 columns per side removes <N> labelled mask pixels; brightest removed pixel is <x> of slice max
+![Crop check](images/crop_check.png)
 ### 4.3 Split
 - Provided split used: 31 / 4 / 3 patients, 11,460 / 660 / 540 slices, 60 slices per scan
 - Verified patient-level: zero patient overlap between train, validate and test
