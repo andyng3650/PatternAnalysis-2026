@@ -4,6 +4,9 @@ train.py - Train the baseline autoencoder or VQ-VAE2 on HipMRI 2D slices (COMP37
 Smoke test (a few hundred steps, prints the measured speed):
     python train.py --data-dir "<path>/keras_slices_data" --model vqvae2 --max-steps 200
 
+Full run (keep the Mac awake):
+    caffeinate -i python train.py --data-dir "<path>/keras_slices_data" --model vqvae2 --epochs 30
+
 Outputs, in <out-dir>/<model>/:
     log.csv            losses and time per epoch (for the training curves)
     snapshots/         reconstructions of the same 8 validation slices every few epochs
