@@ -16,6 +16,7 @@ Shapes for a (B, 1, 256, 128) batch with downsample=4:
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class ResidualBlock(nn.Module):
@@ -87,6 +88,54 @@ class Decoder(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+class VectorQuantizer(nn.Module):
+    """
+    Quantizing the output continuous latent tensor Z_e(x) from the encoder 
+    by performing KNN (K=1) to choose the nearest codebook entry.
+    OUtputting discrete latent vector Z_q(x).
+    """
+
+    def __init__(self, num_codes=512, dim=64, beta=0.25):
+        super(VectorQuantizer, self).__init__()
+
+        self.num_codes = num_codes
+        self.dim = dim
+        self.beta = beta
+
+        self.embedding = nn.Embedding(self.num_codes, self.dim)
+
+    def forward(self, z):
+        # reform input z (B, D, H, W) → (B, H, W, D) -> (N,D)
+        z = z.permute(0, 2, 3, 1).contiguous()
+        z_flattened = z.view(-1, self.dim) 
+
+        # compute the distance from every vector to every codebook entry, giving an (N, K) matrix.
+        # distance from a 2D ‖z − e‖² = ‖z‖² + ‖e‖² − 2·z·e
+        dist = torch.sum(z_flattened**2, dim=1, keepdim=True) + torch.sum(self.embedding.weight**2, dim=1) - 2 * \
+            torch.matmul(z_flattened, self.embedding.weight.t())
+
+        # pick the nearest code for each vector (ids), then look up those code vectors.
+        min_encoding_indices = torch.argmin(dist, dim=1).unsqueeze(1)
+        min_encodings = torch.zeros(min_encoding_indices.shape[0], self.num_codes, device=z.device)
+        min_encodings.scatter_(1, min_encoding_indices, 1)
+
+        # get quantized latent vectors
+        z_q = torch.matmul(min_encodings, self.embedding.weight).view(z.shape)
+
+        # compute the loss
+        loss_codebook = F.mse_loss(z_q, z.detach())
+        loss_commitment = F.mse_loss(z_q.detach(), z)
+        loss = loss_codebook + self.beta * loss_commitment
+
+        # the straight-through estimator
+        z_q = z + (z_q - z).detach()
+
+        # reshape q -> (B, D, H, W)
+        q = z_q.permute(0, 3, 1, 2).contiguous()
+        # reshape ids -> (B,H,W)
+        ids = min_encoding_indices.view(z.shape[:-1])
+
+        return q, loss, ids 
 
 class BaselineAE(nn.Module):
     """Plain autoencoder: encoder -> 1x1 conv to a latent of `embed_dim` channels -> decoder.
