@@ -103,6 +103,7 @@ class VectorQuantizer(nn.Module):
         self.beta = beta
 
         self.embedding = nn.Embedding(self.num_codes, self.dim)
+        self.embedding.weight.data.uniform_(-1.0 / self.num_codes, 1.0 / self.num_codes)
 
     def forward(self, z):
         # reform input z (B, D, H, W) → (B, H, W, D) -> (N,D)
