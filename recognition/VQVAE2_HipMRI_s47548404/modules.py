@@ -137,6 +137,69 @@ class VectorQuantizer(nn.Module):
 
         return q, loss, ids 
 
+    def embed_code(self, ids):
+        """(B, H, W) integer code ids -> (B, D, H, W) code vectors, e.g. for decoding generated codes."""
+        return self.embedding(ids).permute(0, 3, 1, 2).contiguous()
+
+class VQVAE2(nn.Module):
+    def __init__(self, in_channel=1, channel=128, n_res_block=2, n_res_channel=32, 
+                 embed_dim=64, n_embed=512):
+
+        super(VQVAE2, self).__init__()
+
+        self.enc_b = Encoder(in_channel, channel, n_res_channel, n_res_block, downsample=4)
+        self.enc_t = Encoder(channel, channel, n_res_channel, n_res_block, downsample=2)
+        self.quantize_conv_t = nn.Conv2d(channel, embed_dim, 1)
+        self.quantize_t = VectorQuantizer(n_embed, embed_dim)
+        self.dec_t = Decoder(embed_dim, embed_dim, channel, n_res_channel, n_res_block, upsample=2)
+        self.quantize_conv_b = nn.Conv2d(embed_dim + channel, embed_dim, 1)
+        self.quantize_b = VectorQuantizer(n_embed, embed_dim)
+        self.upsample_t = nn.ConvTranspose2d(embed_dim, embed_dim, 4, stride=2, padding=1)
+        self.dec = Decoder(
+            embed_dim + embed_dim,
+            in_channel,
+            channel,
+            n_res_channel,
+            n_res_block,
+            upsample=4,
+        )
+
+    def forward(self, input):
+        quant_t, quant_b, diff, _, _ = self.encode(input)
+        dec = self.decode(quant_t, quant_b)
+
+        return dec, diff
+
+    def encode(self, input):
+        enc_b = self.enc_b(input)
+        enc_t = self.enc_t(enc_b)
+
+        quant_t = self.quantize_conv_t(enc_t)
+        quant_t, diff_t, id_t = self.quantize_t(quant_t)
+
+        dec_t = self.dec_t(quant_t)
+        enc_b = torch.cat([dec_t, enc_b], 1)
+
+        quant_b = self.quantize_conv_b(enc_b)
+        quant_b, diff_b, id_b = self.quantize_b(quant_b)
+        quant_b = quant_b
+
+        return quant_t, quant_b, diff_t + diff_b, id_t, id_b
+
+    def decode(self, quant_t, quant_b):
+        upsample_t = self.upsample_t(quant_t)
+        quant = torch.cat([upsample_t, quant_b], 1)
+
+        return torch.sigmoid(self.dec(quant))
+
+    def decode_code(self, code_t, code_b):
+        quant_t = self.quantize_t.embed_code(code_t)
+        quant_b = self.quantize_b.embed_code(code_b)
+
+        dec = self.decode(quant_t, quant_b)
+
+        return dec
+
 class BaselineAE(nn.Module):
     """Plain autoencoder: encoder -> 1x1 conv to a latent of `embed_dim` channels -> decoder.
 
@@ -166,3 +229,19 @@ if __name__ == "__main__":
     print(f"output range {out.min():.3f} to {out.max():.3f}, parameters: {n_params:,}")
     assert out.shape == x.shape, "output shape must match input shape"
     print("Shape test passed.")
+
+    # VQ-VAE2 shape test: reconstruction path and generation path
+    vq2 = VQVAE2()
+    x = torch.rand(8, 1, 256, 128)
+    quant_t, quant_b, diff, id_t, id_b = vq2.encode(x)
+    out, loss = vq2(x)
+    gen = vq2.decode_code(id_t, id_b)
+    print(f"VQ-VAE2: input {tuple(x.shape)} -> id_t {tuple(id_t.shape)}, id_b {tuple(id_b.shape)}"
+          f" -> output {tuple(out.shape)}, decode_code {tuple(gen.shape)}")
+    assert out.shape == x.shape and gen.shape == x.shape, "output shapes must match input"
+    assert id_t.shape == (8, 32, 16) and id_b.shape == (8, 64, 32), "unexpected code grid shapes"
+    assert loss.dim() == 0, f"VQ loss should be a single number, got shape {tuple(loss.shape)}"
+    (out.mean() + loss).backward()
+    assert vq2.enc_b.net[0].weight.grad is not None, "no gradient reached the bottom encoder"
+    print(f"VQ loss {loss.item():.4f}, parameters: {sum(p.numel() for p in vq2.parameters()):,}")
+    print("VQ-VAE2 shape test passed.")

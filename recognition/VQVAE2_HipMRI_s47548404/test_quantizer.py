@@ -62,4 +62,8 @@ assert torch.allclose(z2.grad, expected_grad, atol=1e-7), \
     "gradient on z from the loss is not beta-scaled: beta may be on the wrong term"
 print("6. Beta is on the commitment term, as in the paper")
 
+# 7. embed_code turns ids back into the same vectors the forward pass chose
+assert torch.allclose(vq.embed_code(ids), q.detach(), atol=1e-5), "embed_code does not match forward"
+print("7. embed_code reproduces the quantised output")
+
 print("All VQ tests passed.")
