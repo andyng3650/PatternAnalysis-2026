@@ -240,6 +240,101 @@ class BaselineAE(nn.Module):
         return torch.sigmoid(self.decoder(z))  # outputs in [0, 1], like the inputs
 
 
+class MaskedConv2d(nn.Conv2d):
+    """Convolution that only sees positions above, and to the left on the same row.
+
+    Type 'A' also hides the centre: used in the first layer, so a position
+    cannot see its own code. Type 'B' keeps the centre: used in later layers,
+    where the centre already holds only "past" information.
+    """
+
+    def __init__(self, mask_type, in_channels, out_channels, kernel_size):
+        super().__init__(in_channels, out_channels, kernel_size, padding=kernel_size // 2)
+        if mask_type not in ("A", "B"):
+            raise ValueError("mask_type must be 'A' or 'B'")
+        mask = torch.ones_like(self.weight)
+        c = kernel_size // 2
+        mask[:, :, c, c + int(mask_type == "B"):] = 0  # centre row: centre (A only) and right
+        mask[:, :, c + 1:, :] = 0                      # all rows below
+        self.register_buffer("mask", mask)
+
+    def forward(self, x):
+        return F.conv2d(x, self.weight * self.mask, self.bias, padding=self.padding)
+
+
+class GatedResBlock(nn.Module):
+    """Masked conv -> (+ condition) -> tanh(a) * sigmoid(b) -> 1x1 conv, with a skip connection."""
+
+    def __init__(self, channels, kernel_size, cond_channels=0):
+        super().__init__()
+        self.conv = MaskedConv2d("B", channels, 2 * channels, kernel_size)
+        self.cond = nn.Conv2d(cond_channels, 2 * channels, 1) if cond_channels else None
+        self.out = nn.Conv2d(channels, channels, 1)
+
+    def forward(self, x, cond=None):
+        h = self.conv(x)
+        if self.cond is not None:
+            h = h + self.cond(cond)
+        a, b = h.chunk(2, dim=1)
+        return x + self.out(torch.tanh(a) * torch.sigmoid(b))
+
+
+class PixelCNNPrior(nn.Module):
+    """Autoregressive prior over a grid of code ids.
+
+    Unconditional (top prior):  PixelCNNPrior(num_codes=512)
+    Conditional (bottom prior): PixelCNNPrior(num_codes=512, cond_num_codes=512);
+        the top grid (H/2, W/2) is embedded and upsampled x2 to condition every block.
+
+    forward(ids, cond_ids) -> logits (B, num_codes, H, W); train with
+    F.cross_entropy(logits, ids).
+    """
+
+    def __init__(self, num_codes=512, channels=128, n_layers=10, kernel_size=5,
+                 cond_num_codes=None):
+        super().__init__()
+        self.num_codes = num_codes
+        self.embed = nn.Embedding(num_codes, channels)
+        self.input_conv = MaskedConv2d("A", channels, channels, 7)
+        cond_channels = channels if cond_num_codes else 0
+        self.blocks = nn.ModuleList(
+            [GatedResBlock(channels, kernel_size, cond_channels) for _ in range(n_layers)])
+        self.head = nn.Sequential(
+            nn.ReLU(), nn.Conv2d(channels, channels, 1),
+            nn.ReLU(), nn.Conv2d(channels, num_codes, 1))
+        if cond_num_codes:
+            self.cond_embed = nn.Embedding(cond_num_codes, channels)
+            self.cond_net = nn.Sequential(  # (B, C, H/2, W/2) -> (B, C, H, W)
+                nn.Conv2d(channels, channels, 3, padding=1), nn.ReLU(),
+                nn.ConvTranspose2d(channels, channels, 4, stride=2, padding=1), nn.ReLU(),
+                nn.Conv2d(channels, channels, 3, padding=1))
+        else:
+            self.cond_embed = None
+
+    def forward(self, ids, cond_ids=None):
+        x = self.embed(ids).permute(0, 3, 1, 2)  # (B, H, W) -> (B, C, H, W)
+        cond = None
+        if self.cond_embed is not None:
+            cond = self.cond_net(self.cond_embed(cond_ids).permute(0, 3, 1, 2))
+        h = self.input_conv(x)
+        for block in self.blocks:
+            h = block(h, cond)
+        return self.head(h)
+
+    @torch.no_grad()
+    def sample(self, n, shape, device, cond_ids=None, temperature=1.0):
+        """Generate n grids of `shape` (H, W), one position at a time in raster order.
+
+        Slow by design: H * W full forward passes (the sampling-speed risk from the review).
+        """
+        H, W = shape
+        ids = torch.zeros(n, H, W, dtype=torch.long, device=device)
+        for i in range(H):
+            for j in range(W):
+                logits = self.forward(ids, cond_ids)[:, :, i, j] / temperature
+                ids[:, i, j] = torch.multinomial(F.softmax(logits, dim=1), 1).squeeze(1)
+        return ids
+
 if __name__ == "__main__":
     # Shape test: a fake batch must come back with exactly the input shape
     x = torch.rand(8, 1, 256, 128)
