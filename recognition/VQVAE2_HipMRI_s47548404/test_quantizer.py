@@ -66,4 +66,15 @@ print("6. Beta is on the commitment term, as in the paper")
 assert torch.allclose(vq.embed_code(ids), q.detach(), atol=1e-5), "embed_code does not match forward"
 print("7. embed_code reproduces the quantised output")
 
+# 8. Dead-code reset moves unused codes onto encoder outputs
+vq3 = VectorQuantizer(num_codes=K, dim=D, beta=0.25, reset_every=1)
+z3 = torch.randn(B, D, H, W)
+_, _, ids3 = vq3(z3)                       # one training step triggers the reset
+dead = torch.ones(K, dtype=torch.bool)
+dead[ids3.unique()] = False
+rows = z3.permute(0, 2, 3, 1).reshape(-1, D)
+moved = torch.cdist(vq3.embedding.weight[dead].detach(), rows, compute_mode="donot_use_mm_for_euclid_dist").min(dim=1).values
+assert torch.allclose(moved, torch.zeros_like(moved), atol=1e-5), "dead codes were not moved onto encoder outputs"
+print(f"8. Dead-code reset moved {int(dead.sum())} unused codes onto encoder outputs")
+
 print("All VQ tests passed.")

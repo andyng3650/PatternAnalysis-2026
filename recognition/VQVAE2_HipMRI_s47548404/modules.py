@@ -95,15 +95,20 @@ class VectorQuantizer(nn.Module):
     OUtputting discrete latent vector Z_q(x).
     """
 
-    def __init__(self, num_codes=512, dim=64, beta=0.25):
+    def __init__(self, num_codes=512, dim=64, beta=0.25, reset_every=100):
         super(VectorQuantizer, self).__init__()
 
         self.num_codes = num_codes
         self.dim = dim
         self.beta = beta
+        self.reset_every = reset_every
 
         self.embedding = nn.Embedding(self.num_codes, self.dim)
         self.embedding.weight.data.uniform_(-1.0 / self.num_codes, 1.0 / self.num_codes)
+
+        # Buffers: saved with the model but not trained by the optimiser
+        self.register_buffer("usage", torch.zeros(num_codes))           # times each code was chosen
+        self.register_buffer("steps", torch.zeros((), dtype=torch.long))  # training forward passes
 
     def forward(self, z):
         # reform input z (B, D, H, W) → (B, H, W, D) -> (N,D)
@@ -136,11 +141,27 @@ class VectorQuantizer(nn.Module):
         # reshape ids -> (B,H,W)
         ids = min_encoding_indices.view(z.shape[:-1])
 
+        if self.training:
+            self._reset_dead_codes(z_flattened.detach(), min_encodings)
+
         return q, loss, ids 
 
     def embed_code(self, ids):
         """(B, H, W) integer code ids -> (B, D, H, W) code vectors, e.g. for decoding generated codes."""
         return self.embedding(ids).permute(0, 3, 1, 2).contiguous()
+    
+    @torch.no_grad()
+    def _reset_dead_codes(self, z_flattened, min_encodings):
+        """Every `reset_every` training steps, move unused codes onto random encoder outputs."""
+        self.usage += min_encodings.sum(0)   # how many positions picked each code this batch
+        self.steps += 1
+        if self.steps % self.reset_every == 0:
+            dead = self.usage == 0
+            n_dead = int(dead.sum())
+            if n_dead > 0:
+                pick = torch.randint(0, z_flattened.shape[0], (n_dead,), device=z_flattened.device)
+                self.embedding.weight.data[dead] = z_flattened[pick]
+            self.usage.zero_()
 
 class VQVAE2(nn.Module):
     def __init__(self, in_channel=1, channel=128, n_res_block=2, n_res_channel=32, 
