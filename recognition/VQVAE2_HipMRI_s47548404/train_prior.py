@@ -42,6 +42,7 @@ def parse_args():
     p.add_argument("--out-dir", default="runs/prior")
     p.add_argument("--max-steps", type=int, default=None)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--num-codes", type=int, default=512)
     return p.parse_args()
 
 
@@ -109,8 +110,12 @@ def train_level(level, args, device, codes_train, codes_val):
     train_loader = DataLoader(TensorDataset(*codes_train), batch_size=args.batch_size,
                               shuffle=True, drop_last=True)
     val_loader = DataLoader(TensorDataset(*codes_val), batch_size=args.batch_size)
-    prior = PixelCNNPrior(num_codes=512, channels=args.channels, n_layers=args.n_layers,
-                          cond_num_codes=512 if level == "bottom" else None).to(device)
+    prior = PixelCNNPrior(num_codes=args.num_codes, channels=args.channels, n_layers=args.n_layers,
+                          cond_num_codes=args.num_codes if level == "bottom" else None).to(device)
+    # Start at the code-frequency baseline: output bias = log p(code)
+    target = codes_train[0] if level == "top" else codes_train[1]
+    counts = torch.bincount(target.long().flatten(), minlength=args.num_codes).float()
+    prior.head[-1].bias.data = (counts.clamp_min(1) / counts.sum()).log().to(device)
     optimizer = torch.optim.Adam(prior.parameters(), lr=args.lr)
     n_params = sum(p.numel() for p in prior.parameters())
     print(f"\n=== {level} prior: {n_params:,} parameters, {len(train_loader)} steps/epoch ===")
@@ -162,7 +167,7 @@ def train_level(level, args, device, codes_train, codes_val):
               f"{seconds / 60:.1f} min")
 
         ckpt = {"model": prior.state_dict(), "level": level, "epoch": epoch, "val_ce": val_ce,
-                "channels": args.channels, "n_layers": args.n_layers}
+                "channels": args.channels, "n_layers": args.n_layers, "num_codes": args.num_codes}
         if val_ce < best_val:
             best_val = val_ce
             torch.save(ckpt, os.path.join(out, f"{level}_best.pt"))
@@ -184,7 +189,7 @@ def main():
                                 os.path.join(args.out_dir, "codes_train.pt"))
     codes_val = extract_codes(vqvae, args.data_dir, "validate", device,
                               os.path.join(args.out_dir, "codes_validate.pt"))
-    report_usage(*codes_train)
+    report_usage(*codes_train, num_codes=args.num_codes)
     del vqvae  # free memory before training the priors
 
     levels = ["top", "bottom"] if args.level == "both" else [args.level]
