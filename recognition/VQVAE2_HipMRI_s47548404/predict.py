@@ -16,6 +16,9 @@ Usage:
     python predict.py --data-dir "<path>/keras_slices_data" --n-samples 16
     # re-run the evaluation without re-sampling (sampling is slow):
     python predict.py --data-dir "<path>/keras_slices_data" --load-samples
+    # Plan B (merged codes): priors trained on merged code ids
+    python predict.py --data-dir "<path>/keras_slices_data" --prior-dir runs/prior_merged \
+        --merge-file runs/prior_merged/merge.pt --out-dir runs/predict_merged
 """
 import argparse
 import json
@@ -49,6 +52,8 @@ def parse_args():
     p.add_argument("--sample-batch", type=int, default=16)
     p.add_argument("--temperature", type=float, default=1.0)
     p.add_argument("--load-samples", action="store_true", help="reuse samples.npz")
+    p.add_argument("--merge-file", default=None,
+                   help="merge.pt from merge_codes.py, if the priors were trained on merged codes")
     p.add_argument("--seed", type=int, default=0)
     return p.parse_args()
 
@@ -65,8 +70,9 @@ def load_baseline(path, device):
 
 def load_prior(path, level, device):
     ckpt = torch.load(path, map_location=device)
-    prior = PixelCNNPrior(num_codes=512, channels=ckpt["channels"], n_layers=ckpt["n_layers"],
-                          cond_num_codes=512 if level == "bottom" else None).to(device)
+    k = ckpt.get("num_codes", 512)
+    prior = PixelCNNPrior(num_codes=k, channels=ckpt["channels"], n_layers=ckpt["n_layers"],
+                          cond_num_codes=k if level == "bottom" else None).to(device)
     prior.load_state_dict(ckpt["model"])
     prior.eval()
     print(f"Loaded {level} prior from {path} (epoch {ckpt['epoch']}, val CE {ckpt['val_ce']:.4f})")
@@ -107,7 +113,9 @@ def recon_figure(x, recons, path, n=8):
 
 # 2. generation
 @torch.no_grad()
-def generate(vqvae, top_prior, bottom_prior, n, batch, device, temperature):
+def generate(vqvae, top_prior, bottom_prior, n, batch, device, temperature, merge=None):
+    """Sample code grids and decode them. With `merge`, the priors output merged group ids,
+    which are mapped to each group's representative code before decoding."""
     images, tops, bottoms, seconds = [], [], [], []
     for start in range(0, n, batch):
         b = min(batch, n - start)
@@ -115,6 +123,8 @@ def generate(vqvae, top_prior, bottom_prior, n, batch, device, temperature):
         t0 = time.time()
         top = top_prior.sample(b, TOP_SHAPE, device, temperature=temperature)
         bottom = bottom_prior.sample(b, BOTTOM_SHAPE, device, cond_ids=top, temperature=temperature)
+        if merge is not None:
+            top, bottom = merge["top_rep"][top], merge["bottom_rep"][bottom]
         x = vqvae.decode_code(top, bottom).clamp(0, 1)
         sync(device)
         seconds.append(time.time() - t0)
@@ -245,8 +255,13 @@ def main():
         top_prior = load_prior(os.path.join(args.prior_dir, "top_best.pt"), "top", device)
         bottom_prior = load_prior(os.path.join(args.prior_dir, "bottom_best.pt"), "bottom", device)
         print(f"Sampling {args.n_samples} slices (temperature {args.temperature})...")
+        merge = None
+        if args.merge_file:
+            m = torch.load(args.merge_file)
+            merge = {"top_rep": m["top_rep"].to(device), "bottom_rep": m["bottom_rep"].to(device)}
+            print(f"Using merged codes from {args.merge_file} (k={m['k']})")
         samples, tops, bottoms, sec = generate(vqvae, top_prior, bottom_prior, args.n_samples,
-                                               args.sample_batch, device, args.temperature)
+                                               args.sample_batch, device, args.temperature, merge)
         metrics["sampling_seconds_per_slice"] = sec
         np.savez(sample_path, images=samples.numpy(), top=tops.numpy(), bottom=bottoms.numpy())
         print(f"Sampling: {sec:.1f} s per slice on {device}")
