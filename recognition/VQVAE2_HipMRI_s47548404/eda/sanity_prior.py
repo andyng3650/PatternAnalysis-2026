@@ -1,3 +1,7 @@
+# Results (200 steps, toy task where each code = left neighbour + 1, uniform guess 4.85):
+#   before fix: cpu 0.392 | mps 4.853 (4-D loss) | mps 4.853 (flattened loss)
+#   after .contiguous() fix in PixelCNNPrior.forward: mps 0.392
+
 import torch, torch.nn.functional as F
 from modules import PixelCNNPrior
 

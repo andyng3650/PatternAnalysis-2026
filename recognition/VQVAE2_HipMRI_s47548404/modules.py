@@ -312,10 +312,10 @@ class PixelCNNPrior(nn.Module):
             self.cond_embed = None
 
     def forward(self, ids, cond_ids=None):
-        x = self.embed(ids).permute(0, 3, 1, 2)  # (B, H, W) -> (B, C, H, W)
+        x = self.embed(ids).permute(0, 3, 1, 2).contiguous()  # (B, H, W) -> (B, C, H, W)
         cond = None
         if self.cond_embed is not None:
-            cond = self.cond_net(self.cond_embed(cond_ids).permute(0, 3, 1, 2))
+            cond = self.cond_net(self.cond_embed(cond_ids).permute(0, 3, 1, 2)).contiguous()
         h = self.input_conv(x)
         for block in self.blocks:
             h = block(h, cond)
